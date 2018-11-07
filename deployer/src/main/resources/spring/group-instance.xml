@@ -10,26 +10,7 @@
            http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context-2.5.xsd"
 	default-autowire="byName">
 	
-	<!-- properties -->
-	<bean class="com.alibaba.otter.canal.instance.spring.support.PropertyPlaceholderConfigurer" lazy-init="false">
-		<property name="ignoreResourceNotFound" value="true" />
-		<property name="systemPropertiesModeName" value="SYSTEM_PROPERTIES_MODE_OVERRIDE"/><!-- 允许system覆盖 -->
-		<property name="locationNames">
-			<list>
-				<value>classpath:canal.properties</value>
-				<value>classpath:${canal.instance.destination:}/instance.properties</value>
-			</list>
-		</property>
-	</bean>
-	
-	<bean id="socketAddressEditor" class="com.alibaba.otter.canal.instance.spring.support.SocketAddressEditor" />
-	<bean class="org.springframework.beans.factory.config.CustomEditorConfigurer"> 
-		<property name="propertyEditorRegistrars">
-			<list>
-				<ref bean="socketAddressEditor" />
-			</list>
-		</property>
-	</bean>
+	<import resource="classpath:spring/base-instance.xml" />
 
 	<bean id="instance" class="com.alibaba.otter.canal.instance.spring.CanalInstanceWithSpring">
 		<property name="destination" value="${canal.instance.destination}" />
@@ -60,10 +41,12 @@
 		<property name="bufferMemUnit" value="${canal.instance.memory.buffer.memunit:1024}" />
 		<property name="batchMode" value="${canal.instance.memory.batch.mode:MEMSIZE}" />
 		<property name="ddlIsolation" value="${canal.instance.get.ddl.isolation:false}" />
+		<property name="raw" value="${canal.instance.memory.rawEntry:true}" />
 	</bean>
 	
 	<bean id="eventSink" class="com.alibaba.otter.canal.sink.entry.EntryEventSink">
 		<property name="eventStore" ref="eventStore" />
+		<property name="filterTransactionEntry" value="${canal.instance.filter.transaction.entry:false}"/>
 	</bean>
 	
 	<bean id="eventParser" class="com.alibaba.otter.canal.parse.inbound.group.GroupEventParser">
@@ -75,9 +58,9 @@
 		</property>
 	</bean>
 
-	<bean id="eventParser1" class="com.alibaba.otter.canal.parse.inbound.mysql.MysqlEventParser">
+	<bean id="eventParser1" parent="baseEventParser">
 		<property name="destination" value="${canal.instance.destination}" />
-		<property name="slaveId" value="${canal.instance.mysql.slaveId:1234}" />
+		<property name="slaveId" value="${canal.instance.mysql.slaveId:0}" />
 		<!-- 心跳配置 -->
 		<property name="detectingEnable" value="${canal.instance.detecting.enable:false}" />
 		<property name="detectingSQL" value="${canal.instance.detecting.sql}" />
@@ -126,19 +109,23 @@
 		
 		<!-- 解析数据库信息 -->
 		<property name="masterInfo">
-			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo">
+			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo" init-method="initPwd">
 				<property name="address" value="${canal.instance.master1.address}" />
 				<property name="username" value="${canal.instance.dbUsername:retl}" />
 				<property name="password" value="${canal.instance.dbPassword:retl}" />
-				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:retl}" />
+				<property name="pwdPublicKey" value="${canal.instance.pwdPublicKey:retl}" />
+				<property name="enableDruid" value="${canal.instance.enableDruid:false}" />
+				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:test}" />
 			</bean>
 		</property>
 		<property name="standbyInfo">
-			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo">
+			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo" init-method="initPwd">
 				<property name="address" value="${canal.instance.standby1.address}" />
 				<property name="username" value="${canal.instance.dbUsername:retl}" />
 				<property name="password" value="${canal.instance.dbPassword:retl}" />
-				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:retl}" />
+				<property name="pwdPublicKey" value="${canal.instance.pwdPublicKey:retl}" />
+				<property name="enableDruid" value="${canal.instance.enableDruid:false}" />
+				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:test}" />
 			</bean>
 		</property>
 		
@@ -148,6 +135,7 @@
 				<property name="journalName" value="${canal.instance.master1.journal.name}" />
 				<property name="position" value="${canal.instance.master1.position}" />
 				<property name="timestamp" value="${canal.instance.master1.timestamp}" />
+				<property name="gtid" value="${canal.instance.master1.gtid}" />
 			</bean>
 		</property>
 		<property name="standbyPosition">
@@ -155,17 +143,26 @@
 				<property name="journalName" value="${canal.instance.standby1.journal.name}" />
 				<property name="position" value="${canal.instance.standby1.position}" />
 				<property name="timestamp" value="${canal.instance.standby1.timestamp}" />
+				<property name="gtid" value="${canal.instance.standby1.gtid}" />
 			</bean>
 		</property>
 		<property name="filterQueryDml" value="${canal.instance.filter.query.dml:false}" />
 		<property name="filterQueryDcl" value="${canal.instance.filter.query.dcl:false}" />
 		<property name="filterQueryDdl" value="${canal.instance.filter.query.ddl:false}" />
+		<property name="useDruidDdlFilter" value="${canal.instance.filter.druid.ddl:true}" />
 		<property name="filterTableError" value="${canal.instance.filter.table.error:false}" />
+		<property name="supportBinlogFormats" value="${canal.instance.binlog.format}" />
+		<property name="supportBinlogImages" value="${canal.instance.binlog.image}" />
+		
+		<!-- parallel parser -->
+		<property name="parallel" value="${canal.instance.parser.parallel:true}" />
+		<property name="parallelThreadSize" value="${canal.instance.parser.parallelThreadSize}" />
+		<property name="parallelBufferSize" value="${canal.instance.parser.parallelBufferSize:256}" />
 	</bean>
 	
-	<bean id="eventParser2" class="com.alibaba.otter.canal.parse.inbound.mysql.MysqlEventParser">
+	<bean id="eventParser2" parent="baseEventParser">
 		<property name="destination" value="${canal.instance.destination}" />
-		<property name="slaveId" value="${canal.instance.mysql.slaveId:1234}" />
+		<property name="slaveId" value="${canal.instance.mysql.slaveId:0}" />
 		<!-- 心跳配置 -->
 		<property name="detectingEnable" value="${canal.instance.detecting.enable:false}" />
 		<property name="detectingSQL" value="${canal.instance.detecting.sql}" />
@@ -214,19 +211,23 @@
 		
 		<!-- 解析数据库信息 -->
 		<property name="masterInfo">
-			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo">
+			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo" init-method="initPwd">
 				<property name="address" value="${canal.instance.master2.address}" />
 				<property name="username" value="${canal.instance.dbUsername:retl}" />
 				<property name="password" value="${canal.instance.dbPassword:retl}" />
-				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:retl}" />
+				<property name="pwdPublicKey" value="${canal.instance.pwdPublicKey:retl}" />
+				<property name="enableDruid" value="${canal.instance.enableDruid:false}" />
+				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:test}" />
 			</bean>
 		</property>
 		<property name="standbyInfo">
-			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo">
+			<bean class="com.alibaba.otter.canal.parse.support.AuthenticationInfo" init-method="initPwd">
 				<property name="address" value="${canal.instance.standby2.address}" />
 				<property name="username" value="${canal.instance.dbUsername:retl}" />
 				<property name="password" value="${canal.instance.dbPassword:retl}" />
-				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:retl}" />
+				<property name="pwdPublicKey" value="${canal.instance.pwdPublicKey:retl}" />
+				<property name="enableDruid" value="${canal.instance.enableDruid:false}" />
+				<property name="defaultDatabaseName" value="${canal.instance.defaultDatabaseName:test}" />
 			</bean>
 		</property>
 		
@@ -236,6 +237,7 @@
 				<property name="journalName" value="${canal.instance.master2.journal.name}" />
 				<property name="position" value="${canal.instance.master2.position}" />
 				<property name="timestamp" value="${canal.instance.master2.timestamp}" />
+				<property name="gtid" value="${canal.instance.master2.gtid}" />
 			</bean>
 		</property>
 		<property name="standbyPosition">
@@ -243,11 +245,21 @@
 				<property name="journalName" value="${canal.instance.standby2.journal.name}" />
 				<property name="position" value="${canal.instance.standby2.position}" />
 				<property name="timestamp" value="${canal.instance.standby2.timestamp}" />
+				<property name="gtid" value="${canal.instance.standby2.gtid}" />
 			</bean>
 		</property>
 		<property name="filterQueryDml" value="${canal.instance.filter.query.dml:false}" />
 		<property name="filterQueryDcl" value="${canal.instance.filter.query.dcl:false}" />
 		<property name="filterQueryDdl" value="${canal.instance.filter.query.ddl:false}" />
+		<property name="useDruidDdlFilter" value="${canal.instance.filter.druid.ddl:true}" />
+		<property name="filterRows" value="${canal.instance.filter.rows:false}" />
 		<property name="filterTableError" value="${canal.instance.filter.table.error:false}" />
+		<property name="supportBinlogFormats" value="${canal.instance.binlog.format}" />
+		<property name="supportBinlogImages" value="${canal.instance.binlog.image}" />
+		
+		<!-- parallel parser -->
+		<property name="parallel" value="${canal.instance.parser.parallel:true}" />
+		<property name="parallelThreadSize" value="${canal.instance.parser.parallelThreadSize}" />
+		<property name="parallelBufferSize" value="${canal.instance.parser.parallelBufferSize:256}" />
 	</bean>
 </beans>

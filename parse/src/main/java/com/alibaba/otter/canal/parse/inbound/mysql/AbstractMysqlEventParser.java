@@ -1,28 +1,48 @@
 package com.alibaba.otter.canal.parse.inbound.mysql;
 
 import java.nio.charset.Charset;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.alibaba.otter.canal.filter.CanalEventFilter;
 import com.alibaba.otter.canal.filter.aviater.AviaterRegexFilter;
+import com.alibaba.otter.canal.parse.CanalEventParser;
+import com.alibaba.otter.canal.parse.exception.CanalParseException;
 import com.alibaba.otter.canal.parse.inbound.AbstractEventParser;
 import com.alibaba.otter.canal.parse.inbound.BinlogParser;
+import com.alibaba.otter.canal.parse.inbound.MultiStageCoprocessor;
 import com.alibaba.otter.canal.parse.inbound.mysql.dbsync.LogEventConvert;
+import com.alibaba.otter.canal.parse.inbound.mysql.tsdb.DefaultTableMetaTSDBFactory;
+import com.alibaba.otter.canal.parse.inbound.mysql.tsdb.TableMetaTSDB;
+import com.alibaba.otter.canal.parse.inbound.mysql.tsdb.TableMetaTSDBFactory;
+import com.alibaba.otter.canal.protocol.position.EntryPosition;
 
 public abstract class AbstractMysqlEventParser extends AbstractEventParser {
 
-    protected final Logger      logger                  = LoggerFactory.getLogger(this.getClass());
-    protected static final long BINLOG_START_OFFEST     = 4L;
+    protected final Logger         logger                    = LoggerFactory.getLogger(this.getClass());
+    protected static final long    BINLOG_START_OFFEST       = 4L;
+
+    protected TableMetaTSDBFactory tableMetaTSDBFactory      = new DefaultTableMetaTSDBFactory();
+    protected boolean              enableTsdb                = false;
+    protected int                  tsdbSnapshotInterval      = 24;
+    protected int                  tsdbSnapshotExpire        = 360;
+    protected String               tsdbSpringXml;
+    protected TableMetaTSDB        tableMetaTSDB;
 
     // 编码信息
-    protected byte              connectionCharsetNumber = (byte) 33;
-    protected Charset           connectionCharset       = Charset.forName("UTF-8");
-    protected boolean           filterQueryDcl          = false;
-    protected boolean           filterQueryDml          = false;
-    protected boolean           filterQueryDdl          = false;
-    protected boolean           filterTableError        = false;
+    protected byte                 connectionCharsetNumber   = (byte) 33;
+    protected Charset              connectionCharset         = Charset.forName("UTF-8");
+    protected boolean              filterQueryDcl            = false;
+    protected boolean              filterQueryDml            = false;
+    protected boolean              filterQueryDdl            = false;
+    protected boolean              filterRows                = false;
+    protected boolean              filterTableError          = false;
+    protected boolean              useDruidDdlFilter         = true;
+    // instance received binlog bytes
+    protected final AtomicLong     receivedBinlogBytes       = new AtomicLong(0L);
+    private final AtomicLong       eventsPublishBlockingTime = new AtomicLong(0L);
 
     protected BinlogParser buildParser() {
         LogEventConvert convert = new LogEventConvert();
@@ -38,6 +58,7 @@ public abstract class AbstractMysqlEventParser extends AbstractEventParser {
         convert.setFilterQueryDcl(filterQueryDcl);
         convert.setFilterQueryDml(filterQueryDml);
         convert.setFilterQueryDdl(filterQueryDdl);
+        convert.setFilterRows(filterRows);
         convert.setFilterTableError(filterTableError);
         return convert;
     }
@@ -51,6 +72,52 @@ public abstract class AbstractMysqlEventParser extends AbstractEventParser {
         }
     }
 
+    /**
+     * 回滚到指定位点
+     * 
+     * @param position
+     * @return
+     */
+    protected boolean processTableMeta(EntryPosition position) {
+        if (tableMetaTSDB != null) {
+            if (position.getTimestamp() == null || position.getTimestamp() <= 0) {
+                throw new CanalParseException("use gtid and TableMeta TSDB should be config timestamp > 0");
+            }
+
+            return tableMetaTSDB.rollback(position);
+        }
+
+        return true;
+    }
+
+    public void start() throws CanalParseException {
+        if (enableTsdb) {
+            if (tableMetaTSDB == null) {
+                synchronized (CanalEventParser.class) {
+                    try {
+                        // 设置当前正在加载的通道，加载spring查找文件时会用到该变量
+                        System.setProperty("canal.instance.destination", destination);
+                        // 初始化
+                        tableMetaTSDB = tableMetaTSDBFactory.build(destination, tsdbSpringXml);
+                    } finally {
+                        System.setProperty("canal.instance.destination", "");
+                    }
+                }
+            }
+        }
+
+        super.start();
+    }
+
+    public void stop() throws CanalParseException {
+        if (enableTsdb) {
+            tableMetaTSDBFactory.destory(destination);
+            tableMetaTSDB = null;
+        }
+
+        super.stop();
+    }
+
     public void setEventBlackFilter(CanalEventFilter eventBlackFilter) {
         super.setEventBlackFilter(eventBlackFilter);
 
@@ -59,6 +126,16 @@ public abstract class AbstractMysqlEventParser extends AbstractEventParser {
             && binlogParser instanceof LogEventConvert) {
             ((LogEventConvert) binlogParser).setNameBlackFilter((AviaterRegexFilter) eventBlackFilter);
         }
+    }
+
+    protected MultiStageCoprocessor buildMultiStageCoprocessor() {
+        MysqlMultiStageCoprocessor mysqlMultiStageCoprocessor = new MysqlMultiStageCoprocessor(parallelBufferSize,
+            parallelThreadSize,
+            (LogEventConvert) binlogParser,
+            transactionBuffer,
+            destination);
+        mysqlMultiStageCoprocessor.setEventsPublishBlockingTime(eventsPublishBlockingTime);
+        return mysqlMultiStageCoprocessor;
     }
 
     // ============================ setter / getter =========================
@@ -87,8 +164,68 @@ public abstract class AbstractMysqlEventParser extends AbstractEventParser {
         this.filterQueryDdl = filterQueryDdl;
     }
 
+    public void setFilterRows(boolean filterRows) {
+        this.filterRows = filterRows;
+    }
+
     public void setFilterTableError(boolean filterTableError) {
         this.filterTableError = filterTableError;
+    }
+
+    public boolean isUseDruidDdlFilter() {
+        return useDruidDdlFilter;
+    }
+
+    public void setUseDruidDdlFilter(boolean useDruidDdlFilter) {
+        this.useDruidDdlFilter = useDruidDdlFilter;
+    }
+
+    public void setEnableTsdb(boolean enableTsdb) {
+        this.enableTsdb = enableTsdb;
+        if (this.enableTsdb) {
+            if (tableMetaTSDB == null) {
+                // 初始化
+                tableMetaTSDB = tableMetaTSDBFactory.build(destination, tsdbSpringXml);
+            }
+        }
+    }
+
+    public void setTsdbSpringXml(String tsdbSpringXml) {
+        this.tsdbSpringXml = tsdbSpringXml;
+        if (this.enableTsdb) {
+            if (tableMetaTSDB == null) {
+                // 初始化
+                tableMetaTSDB = tableMetaTSDBFactory.build(destination, tsdbSpringXml);
+            }
+        }
+    }
+
+    public void setTableMetaTSDBFactory(TableMetaTSDBFactory tableMetaTSDBFactory) {
+        this.tableMetaTSDBFactory = tableMetaTSDBFactory;
+    }
+
+    public AtomicLong getEventsPublishBlockingTime() {
+        return this.eventsPublishBlockingTime;
+    }
+
+    public AtomicLong getReceivedBinlogBytes() {
+        return this.receivedBinlogBytes;
+    }
+
+    public int getTsdbSnapshotInterval() {
+        return tsdbSnapshotInterval;
+    }
+
+    public void setTsdbSnapshotInterval(int tsdbSnapshotInterval) {
+        this.tsdbSnapshotInterval = tsdbSnapshotInterval;
+    }
+
+    public int getTsdbSnapshotExpire() {
+        return tsdbSnapshotExpire;
+    }
+
+    public void setTsdbSnapshotExpire(int tsdbSnapshotExpire) {
+        this.tsdbSnapshotExpire = tsdbSnapshotExpire;
     }
 
 }

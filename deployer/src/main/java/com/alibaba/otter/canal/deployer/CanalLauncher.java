@@ -4,13 +4,17 @@ import java.io.FileInputStream;
 import java.util.Properties;
 
 import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang.exception.ExceptionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.alibaba.otter.canal.kafka.CanalKafkaProducer;
+import com.alibaba.otter.canal.rocketmq.CanalRocketMQProducer;
+import com.alibaba.otter.canal.server.CanalMQStarter;
+import com.alibaba.otter.canal.spi.CanalMQProducer;
+
 /**
  * canal独立版本启动的入口类
- * 
+ *
  * @author jianghang 2012-11-6 下午05:20:49
  * @version 1.0.0
  */
@@ -21,6 +25,10 @@ public class CanalLauncher {
 
     public static void main(String[] args) throws Throwable {
         try {
+            logger.info("## set default uncaught exception handler");
+            setGlobalUncaughtExceptionHandler();
+
+            logger.info("## load canal configurations");
             String conf = System.getProperty("canal.conf", "classpath:canal.properties");
             Properties properties = new Properties();
             if (conf.startsWith(CLASSPATH_URL_PREFIX)) {
@@ -28,6 +36,19 @@ public class CanalLauncher {
                 properties.load(CanalLauncher.class.getClassLoader().getResourceAsStream(conf));
             } else {
                 properties.load(new FileInputStream(conf));
+            }
+
+            CanalMQProducer canalMQProducer = null;
+            String serverMode = CanalController.getProperty(properties, CanalConstants.CANAL_SERVER_MODE);
+            if (serverMode.equalsIgnoreCase("kafka")) {
+                canalMQProducer = new CanalKafkaProducer();
+            } else if (serverMode.equalsIgnoreCase("rocketmq")) {
+                canalMQProducer = new CanalRocketMQProducer();
+            }
+
+            if (canalMQProducer != null) {
+                // disable netty
+                System.setProperty(CanalConstants.CANAL_WITHOUT_NETTY, "true");
             }
 
             logger.info("## start the canal server.");
@@ -41,18 +62,33 @@ public class CanalLauncher {
                         logger.info("## stop the canal server");
                         controller.stop();
                     } catch (Throwable e) {
-                        logger.warn("##something goes wrong when stopping canal Server:\n{}",
-                                    ExceptionUtils.getFullStackTrace(e));
+                        logger.warn("##something goes wrong when stopping canal Server:", e);
                     } finally {
                         logger.info("## canal server is down.");
                     }
                 }
 
             });
+
+            if (canalMQProducer != null) {
+                CanalMQStarter canalServerStarter = new CanalMQStarter(canalMQProducer);
+                if (canalServerStarter != null) {
+                    canalServerStarter.init();
+                }
+            }
         } catch (Throwable e) {
-            logger.error("## Something goes wrong when starting up the canal Server:\n{}",
-                         ExceptionUtils.getFullStackTrace(e));
+            logger.error("## Something goes wrong when starting up the canal Server:", e);
             System.exit(0);
         }
+    }
+
+    private static void setGlobalUncaughtExceptionHandler() {
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+
+            @Override
+            public void uncaughtException(Thread t, Throwable e) {
+                logger.error("UnCaughtException", e);
+            }
+        });
     }
 }

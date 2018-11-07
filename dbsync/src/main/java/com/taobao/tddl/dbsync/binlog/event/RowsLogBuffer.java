@@ -8,6 +8,8 @@ import java.util.BitSet;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import com.taobao.tddl.dbsync.binlog.JsonConversion;
+import com.taobao.tddl.dbsync.binlog.JsonConversion.Json_Value;
 import com.taobao.tddl.dbsync.binlog.LogBuffer;
 import com.taobao.tddl.dbsync.binlog.LogEvent;
 
@@ -24,6 +26,9 @@ public final class RowsLogBuffer {
 
     public static final long   DATETIMEF_INT_OFS = 0x8000000000L;
     public static final long   TIMEF_INT_OFS     = 0x800000L;
+    public static final long   TIMEF_OFS         = 0x800000000000L;
+    private static char[]      digits            = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' };
+
     private final LogBuffer    buffer;
     private final int          columnLen;
     private final String       charsetName;
@@ -162,10 +167,13 @@ public final class RowsLogBuffer {
 
             case LogEvent.MYSQL_TYPE_TIMESTAMP:
             case LogEvent.MYSQL_TYPE_DATETIME:
+            case LogEvent.MYSQL_TYPE_TIMESTAMP2:
+            case LogEvent.MYSQL_TYPE_DATETIME2:
                 javaType = Types.TIMESTAMP;
                 break;
 
             case LogEvent.MYSQL_TYPE_TIME:
+            case LogEvent.MYSQL_TYPE_TIME2:
                 javaType = Types.TIME;
                 break;
 
@@ -359,7 +367,7 @@ public final class RowsLogBuffer {
                     // 转化为unsign long
                     switch (len) {
                         case 1:
-                            value = buffer.getInt8();
+                            value = buffer.getUint8();
                             break;
                         case 2:
                             value = buffer.getBeUint16();
@@ -437,14 +445,23 @@ public final class RowsLogBuffer {
                         break;
                 }
 
+                String second = null;
                 if (tv_sec == 0) {
-                    value = "0000-00-00 00:00:00";
+                    second = "0000-00-00 00:00:00";
                 } else {
                     Timestamp time = new Timestamp(tv_sec * 1000);
-                    time.setNanos(tv_usec * 1000);
-                    String v = time.toString();
-                    value = v.substring(0, v.length() - 2);
+                    second = time.toString();
+                    second = second.substring(0, second.length() - 2);// 去掉毫秒精度.0
                 }
+
+                if (meta >= 1) {
+                    String microSecond = usecondsToStr(tv_usec, meta);
+                    microSecond = microSecond.substring(0, meta);
+                    value = second + '.' + microSecond;
+                } else {
+                    value = second;
+                }
+
                 javaType = Types.TIMESTAMP;
                 length = 4 + (meta + 1) / 2;
                 break;
@@ -464,13 +481,27 @@ public final class RowsLogBuffer {
                     // cal.set(d / 10000, (d % 10000) / 100 - 1, d % 100, t /
                     // 10000, (t % 10000) / 100, t % 100);
                     // value = new Timestamp(cal.getTimeInMillis());
-                    value = String.format("%04d-%02d-%02d %02d:%02d:%02d",
-                        d / 10000,
-                        (d % 10000) / 100,
-                        d % 100,
-                        t / 10000,
-                        (t % 10000) / 100,
-                        t % 100);
+                    // value = String.format("%04d-%02d-%02d %02d:%02d:%02d",
+                    // d / 10000,
+                    // (d % 10000) / 100,
+                    // d % 100,
+                    // t / 10000,
+                    // (t % 10000) / 100,
+                    // t % 100);
+
+                    StringBuilder builder = new StringBuilder();
+                    appendNumber4(builder, d / 10000);
+                    builder.append('-');
+                    appendNumber2(builder, (d % 10000) / 100);
+                    builder.append('-');
+                    appendNumber2(builder, d % 100);
+                    builder.append(' ');
+                    appendNumber2(builder, t / 10000);
+                    builder.append(':');
+                    appendNumber2(builder, (t % 10000) / 100);
+                    builder.append(':');
+                    appendNumber2(builder, t % 100);
+                    value = builder.toString();
                 }
                 javaType = Types.TIMESTAMP;
                 length = 8;
@@ -487,7 +518,6 @@ public final class RowsLogBuffer {
                  * .YYdddddh.hhhhmmmm.mmssssss.ffffffff.ffffffff.ffffffff
                  */
                 long intpart = buffer.getBeUlong40() - DATETIMEF_INT_OFS; // big-endian
-                @SuppressWarnings("unused")
                 int frac = 0;
                 switch (meta) {
                     case 0:
@@ -510,8 +540,9 @@ public final class RowsLogBuffer {
                         break;
                 }
 
+                String second = null;
                 if (intpart == 0) {
-                    value = "0000-00-00 00:00:00";
+                    second = "0000-00-00 00:00:00";
                 } else {
                     // 构造TimeStamp只处理到秒
                     long ymd = intpart >> 17;
@@ -524,14 +555,37 @@ public final class RowsLogBuffer {
                     // % (1 << 5)), (int) (hms >> 12),
                     // (int) ((hms >> 6) % (1 << 6)), (int) (hms % (1 << 6)));
                     // value = new Timestamp(cal.getTimeInMillis());
-                    value = String.format("%04d-%02d-%02d %02d:%02d:%02d",
-                        (int) (ym / 13),
-                        (int) (ym % 13),
-                        (int) (ymd % (1 << 5)),
-                        (int) (hms >> 12),
-                        (int) ((hms >> 6) % (1 << 6)),
-                        (int) (hms % (1 << 6)));
+                    // second = String.format("%04d-%02d-%02d %02d:%02d:%02d",
+                    // (int) (ym / 13),
+                    // (int) (ym % 13),
+                    // (int) (ymd % (1 << 5)),
+                    // (int) (hms >> 12),
+                    // (int) ((hms >> 6) % (1 << 6)),
+                    // (int) (hms % (1 << 6)));
+
+                    StringBuilder builder = new StringBuilder(26);
+                    appendNumber4(builder, (int) (ym / 13));
+                    builder.append('-');
+                    appendNumber2(builder, (int) (ym % 13));
+                    builder.append('-');
+                    appendNumber2(builder, (int) (ymd % (1 << 5)));
+                    builder.append(' ');
+                    appendNumber2(builder, (int) (hms >> 12));
+                    builder.append(':');
+                    appendNumber2(builder, (int) ((hms >> 6) % (1 << 6)));
+                    builder.append(':');
+                    appendNumber2(builder, (int) (hms % (1 << 6)));
+                    second = builder.toString();
                 }
+
+                if (meta >= 1) {
+                    String microSecond = usecondsToStr(frac, meta);
+                    microSecond = microSecond.substring(0, meta);
+                    value = second + '.' + microSecond;
+                } else {
+                    value = second;
+                }
+
                 javaType = Types.TIMESTAMP;
                 length = 5 + (meta + 1) / 2;
                 break;
@@ -550,11 +604,28 @@ public final class RowsLogBuffer {
                     // cal.set(70, 0, 1, i32 / 10000, (i32 % 10000) / 100, i32 %
                     // 100);
                     // value = new Time(cal.getTimeInMillis());
-                    value = String.format("%s%02d:%02d:%02d",
-                        (i32 >= 0) ? "" : "-",
-                        u32 / 10000,
-                        (u32 % 10000) / 100,
-                        u32 % 100);
+                    // value = String.format("%s%02d:%02d:%02d",
+                    // (i32 >= 0) ? "" : "-",
+                    // u32 / 10000,
+                    // (u32 % 10000) / 100,
+                    // u32 % 100);
+
+                    StringBuilder builder = new StringBuilder(12);
+                    if (i32 < 0) {
+                        builder.append('-');
+                    }
+
+                    int d = u32 / 10000;
+                    if (d > 100) {
+                        builder.append(String.valueOf(d));
+                    } else {
+                        appendNumber2(builder, d);
+                    }
+                    builder.append(':');
+                    appendNumber2(builder, (u32 % 10000) / 100);
+                    builder.append(':');
+                    appendNumber2(builder, u32 % 100);
+                    value = builder.toString();
                 }
                 javaType = Types.TIME;
                 length = 3;
@@ -603,7 +674,8 @@ public final class RowsLogBuffer {
                             frac -= 0x100; /* -(0x100 - frac) */
                             // fraclong = frac * 10000;
                         }
-                        ltime = intpart << 24 + frac * 10000;
+                        frac = frac * 10000;
+                        ltime = intpart << 24;
                         break;
                     case 3:
                     case 4:
@@ -619,12 +691,14 @@ public final class RowsLogBuffer {
                             frac -= 0x10000; /* -(0x10000-frac) */
                             // fraclong = frac * 100;
                         }
-                        ltime = intpart << 24 + frac * 100;
+                        frac = frac * 100;
+                        ltime = intpart << 24;
                         break;
                     case 5:
                     case 6:
-                        intpart = buffer.getBeUlong48() - TIMEF_INT_OFS;
+                        intpart = buffer.getBeUlong48() - TIMEF_OFS;
                         ltime = intpart;
+                        frac = (int) (intpart % (1L << 24));
                         break;
                     default:
                         intpart = buffer.getBeUint24() - TIMEF_INT_OFS;
@@ -632,8 +706,9 @@ public final class RowsLogBuffer {
                         break;
                 }
 
+                String second = null;
                 if (intpart == 0) {
-                    value = "00:00:00";
+                    second = "00:00:00";
                 } else {
                     // 目前只记录秒，不处理us frac
                     // if (cal == null) cal = Calendar.getInstance();
@@ -644,11 +719,36 @@ public final class RowsLogBuffer {
                     // value = new Time(cal.getTimeInMillis());
                     long ultime = Math.abs(ltime);
                     intpart = ultime >> 24;
-                    value = String.format("%s%02d:%02d:%02d",
-                        ltime >= 0 ? "" : "-",
-                        (int) ((intpart >> 12) % (1 << 10)),
-                        (int) ((intpart >> 6) % (1 << 6)),
-                        (int) (intpart % (1 << 6)));
+                    // second = String.format("%s%02d:%02d:%02d",
+                    // ltime >= 0 ? "" : "-",
+                    // (int) ((intpart >> 12) % (1 << 10)),
+                    // (int) ((intpart >> 6) % (1 << 6)),
+                    // (int) (intpart % (1 << 6)));
+
+                    StringBuilder builder = new StringBuilder(12);
+                    if (ltime < 0) {
+                        builder.append('-');
+                    }
+
+                    int d = (int) ((intpart >> 12) % (1 << 10));
+                    if (d > 100) {
+                        builder.append(String.valueOf(d));
+                    } else {
+                        appendNumber2(builder, d);
+                    }
+                    builder.append(':');
+                    appendNumber2(builder, (int) ((intpart >> 6) % (1 << 6)));
+                    builder.append(':');
+                    appendNumber2(builder, (int) (intpart % (1 << 6)));
+                    second = builder.toString();
+                }
+
+                if (meta >= 1) {
+                    String microSecond = usecondsToStr(Math.abs(frac), meta);
+                    microSecond = microSecond.substring(0, meta);
+                    value = second + '.' + microSecond;
+                } else {
+                    value = second;
                 }
 
                 javaType = Types.TIME;
@@ -680,7 +780,16 @@ public final class RowsLogBuffer {
                     // cal.set((i32 / (16 * 32)), (i32 / 32 % 16) - 1, (i32 %
                     // 32));
                     // value = new java.sql.Date(cal.getTimeInMillis());
-                    value = String.format("%04d-%02d-%02d", i32 / (16 * 32), i32 / 32 % 16, i32 % 32);
+                    // value = String.format("%04d-%02d-%02d", i32 / (16 * 32),
+                    // i32 / 32 % 16, i32 % 32);
+
+                    StringBuilder builder = new StringBuilder(12);
+                    appendNumber4(builder, i32 / (16 * 32));
+                    builder.append('-');
+                    appendNumber2(builder, i32 / 32 % 16);
+                    builder.append('-');
+                    appendNumber2(builder, i32 % 32);
+                    value = builder.toString();
                 }
                 javaType = Types.DATE;
                 length = 3;
@@ -750,7 +859,7 @@ public final class RowsLogBuffer {
                     // 转化为unsign long
                     switch (len) {
                         case 1:
-                            value = buffer.getInt8();
+                            value = buffer.getUint8();
                             break;
                         case 2:
                             value = buffer.getUint16();
@@ -911,6 +1020,43 @@ public final class RowsLogBuffer {
                 length = len;
                 break;
             }
+            case LogEvent.MYSQL_TYPE_JSON: {
+                switch (meta) {
+                    case 1: {
+                        len = buffer.getUint8();
+                        break;
+                    }
+                    case 2: {
+                        len = buffer.getUint16();
+                        break;
+                    }
+                    case 3: {
+                        len = buffer.getUint24();
+                        break;
+                    }
+                    case 4: {
+                        len = (int) buffer.getUint32();
+                        break;
+                    }
+                    default:
+                        throw new IllegalArgumentException("!! Unknown JSON packlen = " + meta);
+                }
+                if (0 == len) {
+                    // fixed issue #1 by lava, json column of zero length has no
+                    // value, value parsing should be skipped
+                    value = "";
+                } else {
+                    int position = buffer.position();
+                    Json_Value jsonValue = JsonConversion.parse_value(buffer.getUint8(), buffer, len - 1, charsetName);
+                    StringBuilder builder = new StringBuilder();
+                    jsonValue.toJsonString(builder, charsetName);
+                    value = builder.toString();
+                    buffer.position(position + len);
+                }
+                javaType = Types.VARCHAR;
+                length = len;
+                break;
+            }
             case LogEvent.MYSQL_TYPE_GEOMETRY: {
                 /*
                  * MYSQL_TYPE_GEOMETRY: copy from BLOB or TEXT
@@ -936,10 +1082,10 @@ public final class RowsLogBuffer {
                 buffer.fillBytes(binary, 0, len);
 
                 /* Warning unsupport cloumn type */
-                logger.warn(String.format("!! Unsupport column type MYSQL_TYPE_GEOMETRY: meta=%d (%04X), len = %d",
-                    meta,
-                    meta,
-                    len));
+                // logger.warn(String.format("!! Unsupport column type MYSQL_TYPE_GEOMETRY: meta=%d (%04X), len = %d",
+                // meta,
+                // meta,
+                // len));
                 javaType = Types.BINARY;
                 value = binary;
                 length = len;
@@ -972,5 +1118,53 @@ public final class RowsLogBuffer {
 
     public final int getLength() {
         return length;
+    }
+
+    private String usecondsToStr(int frac, int meta) {
+        String sec = String.valueOf(frac);
+        if (meta > 6) {
+            throw new IllegalArgumentException("unknow useconds meta : " + meta);
+        }
+
+        if (sec.length() < 6) {
+            StringBuilder result = new StringBuilder(6);
+            int len = 6 - sec.length();
+            for (; len > 0; len--) {
+                result.append('0');
+            }
+            result.append(sec);
+            sec = result.toString();
+        }
+
+        return sec.substring(0, meta);
+    }
+
+    private void appendNumber4(StringBuilder builder, int d) {
+        if (d >= 1000) {
+            builder.append(digits[d / 1000])
+                .append(digits[(d / 100) % 10])
+                .append(digits[(d / 10) % 10])
+                .append(digits[d % 10]);
+        } else {
+            builder.append('0');
+            appendNumber3(builder, d);
+        }
+    }
+
+    private void appendNumber3(StringBuilder builder, int d) {
+        if (d >= 100) {
+            builder.append(digits[d / 100]).append(digits[(d / 10) % 10]).append(digits[d % 10]);
+        } else {
+            builder.append('0');
+            appendNumber2(builder, d);
+        }
+    }
+
+    private void appendNumber2(StringBuilder builder, int d) {
+        if (d >= 10) {
+            builder.append(digits[(d / 10) % 10]).append(digits[d % 10]);
+        } else {
+            builder.append('0').append(digits[d]);
+        }
     }
 }

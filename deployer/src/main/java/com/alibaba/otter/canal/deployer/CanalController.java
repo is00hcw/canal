@@ -5,6 +5,7 @@ import java.util.Properties;
 
 import org.I0Itec.zkclient.IZkStateListener;
 import org.I0Itec.zkclient.exception.ZkNoNodeException;
+import org.I0Itec.zkclient.exception.ZkNodeExistsException;
 import org.apache.commons.lang.BooleanUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.zookeeper.Watcher.Event.KeeperState;
@@ -15,6 +16,7 @@ import org.springframework.beans.factory.BeanFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.support.ClassPathXmlApplicationContext;
 
+import com.alibaba.otter.canal.common.CanalException;
 import com.alibaba.otter.canal.common.utils.AddressUtils;
 import com.alibaba.otter.canal.common.zookeeper.ZkClientx;
 import com.alibaba.otter.canal.common.zookeeper.ZookeeperPathUtils;
@@ -32,15 +34,17 @@ import com.alibaba.otter.canal.instance.core.CanalInstanceGenerator;
 import com.alibaba.otter.canal.instance.manager.CanalConfigClient;
 import com.alibaba.otter.canal.instance.manager.ManagerCanalInstanceGenerator;
 import com.alibaba.otter.canal.instance.spring.SpringCanalInstanceGenerator;
-import com.alibaba.otter.canal.server.embeded.CanalServerWithEmbeded;
+import com.alibaba.otter.canal.parse.CanalEventParser;
+import com.alibaba.otter.canal.server.embedded.CanalServerWithEmbedded;
 import com.alibaba.otter.canal.server.exception.CanalServerException;
 import com.alibaba.otter.canal.server.netty.CanalServerWithNetty;
 import com.google.common.base.Function;
 import com.google.common.collect.MapMaker;
+import com.google.common.collect.MigrateMap;
 
 /**
  * canal调度控制器
- * 
+ *
  * @author jianghang 2012-11-8 下午12:03:11
  * @version 1.0.0
  */
@@ -58,7 +62,7 @@ public class CanalController {
     private boolean                                  autoScan = true;
     private InstanceAction                           defaultAction;
     private Map<InstanceMode, InstanceConfigMonitor> instanceConfigMonitors;
-    private CanalServerWithEmbeded                   embededCanalServer;
+    private CanalServerWithEmbedded                  embededCanalServer;
     private CanalServerWithNetty                     canalServer;
 
     private CanalInstanceGenerator                   instanceGenerator;
@@ -69,7 +73,7 @@ public class CanalController {
     }
 
     public CanalController(final Properties properties){
-        managerClients = new MapMaker().makeComputingMap(new Function<String, CanalConfigClient>() {
+        managerClients = MigrateMap.makeComputingMap(new Function<String, CanalConfigClient>() {
 
             public CanalConfigClient apply(String managerAddress) {
                 return getManagerClient(managerAddress);
@@ -82,15 +86,32 @@ public class CanalController {
         // 初始化instance config
         initInstanceConfig(properties);
 
+        // init socketChannel
+        String socketChannel = getProperty(properties, CanalConstants.CANAL_SOCKETCHANNEL);
+        if (StringUtils.isNotEmpty(socketChannel)) {
+            System.setProperty(CanalConstants.CANAL_SOCKETCHANNEL, socketChannel);
+        }
+
         // 准备canal server
         cid = Long.valueOf(getProperty(properties, CanalConstants.CANAL_ID));
         ip = getProperty(properties, CanalConstants.CANAL_IP);
         port = Integer.valueOf(getProperty(properties, CanalConstants.CANAL_PORT));
-        embededCanalServer = new CanalServerWithEmbeded();
+        embededCanalServer = CanalServerWithEmbedded.instance();
         embededCanalServer.setCanalInstanceGenerator(instanceGenerator);// 设置自定义的instanceGenerator
-        canalServer = new CanalServerWithNetty(embededCanalServer);
-        canalServer.setIp(ip);
-        canalServer.setPort(port);
+        try {
+            int metricsPort = Integer.valueOf(getProperty(properties, CanalConstants.CANAL_METRICS_PULL_PORT));
+            embededCanalServer.setMetricsPort(metricsPort);
+        } catch (NumberFormatException e) {
+            logger.info("No valid metrics server port found, use default 11112.");
+            embededCanalServer.setMetricsPort(11112);
+        }
+        
+        String canalWithoutNetty = getProperty(properties, CanalConstants.CANAL_WITHOUT_NETTY);
+        if (canalWithoutNetty == null || "false".equals(canalWithoutNetty)) {
+            canalServer = CanalServerWithNetty.instance();
+            canalServer.setIp(ip);
+            canalServer.setPort(port);
+        }
 
         // 处理下ip为空，默认使用hostIp暴露到zk中
         if (StringUtils.isEmpty(ip)) {
@@ -106,7 +127,7 @@ public class CanalController {
 
         final ServerRunningData serverData = new ServerRunningData(cid, ip + ":" + port);
         ServerRunningMonitors.setServerData(serverData);
-        ServerRunningMonitors.setRunningMonitors(new MapMaker().makeComputingMap(new Function<String, ServerRunningMonitor>() {
+        ServerRunningMonitors.setRunningMonitors(MigrateMap.makeComputingMap(new Function<String, ServerRunningMonitor>() {
 
             public ServerRunningMonitor apply(final String destination) {
                 ServerRunningMonitor runningMonitor = new ServerRunningMonitor(serverData);
@@ -146,6 +167,11 @@ public class CanalController {
                                     public void handleNewSession() throws Exception {
                                         initCid(path);
                                     }
+
+                                    @Override
+                                    public void handleSessionEstablishmentError(Throwable error) throws Exception {
+                                        logger.error("failed to connect to zookeeper", error);
+                                    }
                                 });
                             }
                         } finally {
@@ -170,6 +196,8 @@ public class CanalController {
                 if (zkclientx != null) {
                     runningMonitor.setZkClient(zkclientx);
                 }
+                // 触发创建一下cid节点
+                runningMonitor.init();
                 return runningMonitor;
             }
         }));
@@ -182,14 +210,15 @@ public class CanalController {
                 public void start(String destination) {
                     InstanceConfig config = instanceConfigs.get(destination);
                     if (config == null) {
-                        config = new InstanceConfig(globalInstanceConfig);
+                        // 重新读取一下instance config
+                        config = parseInstanceConfig(properties, destination);
                         instanceConfigs.put(destination, config);
                     }
 
-                    if (!config.getLazy() && !embededCanalServer.isStart(destination)) {
+                    if (!embededCanalServer.isStart(destination)) {
                         // HA机制启动
                         ServerRunningMonitor runningMonitor = ServerRunningMonitors.getRunningMonitor(destination);
-                        if (!runningMonitor.isStart()) {
+                        if (!config.getLazy() && !runningMonitor.isStart()) {
                             runningMonitor.start();
                         }
                     }
@@ -214,7 +243,7 @@ public class CanalController {
                 }
             };
 
-            instanceConfigMonitors = new MapMaker().makeComputingMap(new Function<InstanceMode, InstanceConfigMonitor>() {
+            instanceConfigMonitors = MigrateMap.makeComputingMap(new Function<InstanceMode, InstanceConfigMonitor>() {
 
                 public InstanceConfigMonitor apply(InstanceMode mode) {
                     int scanInterval = Integer.valueOf(getProperty(properties, CanalConstants.CANAL_AUTO_SCAN_INTERVAL));
@@ -228,7 +257,13 @@ public class CanalController {
                         if (StringUtils.isEmpty(rootDir)) {
                             rootDir = "../conf";
                         }
-                        monitor.setRootConf(rootDir);
+
+                        if (StringUtils.equals("otter-canal", System.getProperty("appName"))) {
+                            monitor.setRootConf(rootDir);
+                        } else {
+                            // eclipse debug模式
+                            monitor.setRootConf("src/main/resources/");
+                        }
                         return monitor;
                     } else if (mode.isManager()) {
                         return new ManagerInstanceConfigMonitor();
@@ -277,12 +312,15 @@ public class CanalController {
                     return instanceGenerator.generate(destination);
                 } else if (config.getMode().isSpring()) {
                     SpringCanalInstanceGenerator instanceGenerator = new SpringCanalInstanceGenerator();
-                    synchronized (this) {
+                    synchronized (CanalEventParser.class) {
                         try {
                             // 设置当前正在加载的通道，加载spring查找文件时会用到该变量
                             System.setProperty(CanalConstants.CANAL_DESTINATION_PROPERTY, destination);
                             instanceGenerator.setBeanFactory(getBeanFactory(config.getSpringXml()));
                             return instanceGenerator.generate(destination);
+                        } catch (Throwable e) {
+                            logger.error("generator instance failed.", e);
+                            throw new CanalException(e);
                         } finally {
                             System.setProperty(CanalConstants.CANAL_DESTINATION_PROPERTY, "");
                         }
@@ -349,8 +387,19 @@ public class CanalController {
         return config;
     }
 
-    private String getProperty(Properties properties, String key) {
-        return StringUtils.trim(properties.getProperty(StringUtils.trim(key)));
+    public static String getProperty(Properties properties, String key) {
+        key = StringUtils.trim(key);
+        String value = System.getProperty(key);
+
+        if (value == null) {
+            value = System.getenv(key);
+        }
+
+        if (value == null) {
+            value = properties.getProperty(key);
+        }
+
+        return StringUtils.trim(value);
     }
 
     public void start() throws Throwable {
@@ -368,6 +417,11 @@ public class CanalController {
                 public void handleNewSession() throws Exception {
                     initCid(path);
                 }
+
+                @Override
+                public void handleSessionEstablishmentError(Throwable error) throws Exception {
+                    logger.error("failed to connect to zookeeper", error);
+                }
             });
         }
         // 优先启动embeded服务
@@ -377,16 +431,16 @@ public class CanalController {
             final String destination = entry.getKey();
             InstanceConfig config = entry.getValue();
             // 创建destination的工作节点
-            if (!config.getLazy() && !embededCanalServer.isStart(destination)) {
+            if (!embededCanalServer.isStart(destination)) {
                 // HA机制启动
                 ServerRunningMonitor runningMonitor = ServerRunningMonitors.getRunningMonitor(destination);
-                if (!runningMonitor.isStart()) {
+                if (!config.getLazy() && !runningMonitor.isStart()) {
                     runningMonitor.start();
                 }
             }
 
             if (autoScan) {
-                instanceConfigMonitors.get(config.getMode()).regeister(destination, defaultAction);
+                instanceConfigMonitors.get(config.getMode()).register(destination, defaultAction);
             }
         }
 
@@ -400,11 +454,15 @@ public class CanalController {
         }
 
         // 启动网络接口
-        canalServer.start();
+        if (canalServer != null) {
+            canalServer.start();
+        }
     }
 
     public void stop() throws Throwable {
-        canalServer.stop();
+        if (canalServer != null) {
+            canalServer.stop();
+        }
 
         if (autoScan) {
             for (InstanceConfigMonitor monitor : instanceConfigMonitors.values()) {
@@ -423,6 +481,10 @@ public class CanalController {
         // 释放canal的工作节点
         releaseCid(ZookeeperPathUtils.getCanalClusterNode(ip + ":" + port));
         logger.info("## stop the canal server[{}:{}]", ip, port);
+
+        if (zkclientx != null) {
+            zkclientx.close();
+        }
     }
 
     private void initCid(String path) {
@@ -436,6 +498,9 @@ public class CanalController {
                 String parentDir = path.substring(0, path.lastIndexOf('/'));
                 zkclientx.createPersistent(parentDir, true);
                 zkclientx.createEphemeral(path);
+            } catch (ZkNodeExistsException e) {
+                // ignore
+                // 因为第一次启动时创建了cid,但在stop/start的时可能会关闭和新建,允许出现NodeExists问题s
             }
 
         }

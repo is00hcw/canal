@@ -7,10 +7,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import junit.framework.Assert;
-
 import org.apache.commons.lang.math.RandomUtils;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.springframework.util.CollectionUtils;
@@ -31,7 +30,10 @@ import com.alibaba.otter.canal.store.model.Events;
  */
 public class MemoryEventStoreMultiThreadTest extends MemoryEventStoreBase {
 
-    private ExecutorService            executor = Executors.newFixedThreadPool(2); // 1 producer ,1 cousmer
+    private ExecutorService            executor = Executors.newFixedThreadPool(2); // 1
+                                                                                   // producer
+                                                                                   // ,1
+                                                                                   // cousmer
     private MemoryEventStoreWithBuffer eventStore;
 
     @Before
@@ -149,7 +151,8 @@ public class MemoryEventStoreMultiThreadTest extends MemoryEventStoreBase {
 
                 try {
                     Events<Event> entrys = eventStore.get(first, batchSize, 1000L, TimeUnit.MILLISECONDS);
-                    // Events<Event> entrys = eventStore.tryGet(first, batchSize);
+                    // Events<Event> entrys = eventStore.tryGet(first,
+                    // batchSize);
                     if (!CollectionUtils.isEmpty(entrys.getEvents())) {
                         if (entrys.getEvents().size() != batchSize) {
                             System.out.println("get size:" + entrys.getEvents().size() + " with not full batchSize:"
@@ -158,13 +161,12 @@ public class MemoryEventStoreMultiThreadTest extends MemoryEventStoreBase {
 
                         first = entrys.getPositionRange().getEnd();
                         for (Event event : entrys.getEvents()) {
-                            this.result.add(event.getEntry().getHeader().getLogfileOffset());
+                            this.result.add(event.getPosition());
                         }
                         emptyCount = 0;
 
-                        System.out.println("offest : "
-                                           + entrys.getEvents().get(0).getEntry().getHeader().getLogfileOffset()
-                                           + " , count :" + entrys.getEvents().size());
+                        System.out.println("offest : " + entrys.getEvents().get(0).getPosition() + " , count :"
+                                           + entrys.getEvents().size());
                         ackCount++;
                         if (ackCount == 1) {
                             eventStore.cleanUntil(entrys.getPositionRange().getEnd());
