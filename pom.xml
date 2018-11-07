@@ -45,7 +45,36 @@
         <developerConnection>scm:git:git@github.com:alibaba/canal.git</developerConnection>
     </scm>
 
+     
+
+    <!-- 插件依赖地址-->
+    <pluginRepositories>
+        <pluginRepository>
+            <id>dev-nexus</id>
+            <name>nexus</name>
+            <url>http://maven.dev.pagoda.com.cn:10008/nexus/content/groups/public</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </pluginRepository>
+    </pluginRepositories>
+
+ <!-- 配置Nexus私服地址 -->
     <repositories>
+        <repository>
+            <id>dev-nexus</id>
+            <name>nexus</name>
+            <url>http://maven.dev.pagoda.com.cn:10008/nexus/content/groups/public</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </repository>
         <repository>
             <id>central</id>
             <url>http://repo1.maven.org/maven2</url>
