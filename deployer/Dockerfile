@@ -1,10 +1,9 @@
 FROM canal/osbase:v1
 
-MAINTAINER agapple (jianghang115@gmail.com)
 
 # install canal
 
-COPY target/canal.deployer-1.1.1.tar.gz /home/admin/
+COPY deployer/target/canal.deployer-1.1.1.tar.gz /home/admin/
 COPY image/ /tmp/docker/
 
 RUN \
